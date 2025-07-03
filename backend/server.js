@@ -1,114 +1,163 @@
 const express = require("express");
 const fs = require("fs");
-const csv = require("csv-parser");
-const axios = require("axios");
-const cors = require("cors");
 const path = require("path");
+const cors = require("cors");
+const axios = require("axios");
+const csv = require("csv-parser");
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-app.use(cors());
-app.use(express.json());
+const PORT = 8080;
 
-function haversineDistance(lat1, lon1, lat2, lon2) {
+app.use(express.json());
+app.use(cors());
+
+let cities = [];
+
+// ----------------------- Haversine Distance --------------------------
+const haversineDistance = (lat1, lon1, lat2, lon2) => {
+  const toRad = deg => (deg * Math.PI) / 180;
   const R = 6371;
-  const toRad = deg => deg * (Math.PI / 180);
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+// ----------------------- Load CSV on Startup -------------------------
+function loadCityData() {
+  const results = [];
+  const filePath = path.join(__dirname, "cities15000.csv");
+
+  fs.createReadStream(filePath)
+    .pipe(csv())
+    .on("data", data => results.push(data))
+    .on("end", () => {
+      cities = results;
+      console.log(`✅ Loaded ${cities.length} cities from CSV`);
+    });
 }
 
-const cities = [];
-fs.createReadStream(path.join(__dirname, "cities15000.csv"))
-  .pipe(csv())
-  .on("data", row => cities.push(row))
-  .on("end", () => console.log("✅ Loaded city data"));
-
-app.post("/analyze", async (req, res) => {
+// -------------------------- POST /api/analyze ------------------------
+app.post("/api/analyze", async (req, res) => {
   const {
-    method,
     city,
-    latitude,
-    longitude,
+    lat,
+    lon,
+    powerScale,
     delta,
     scale,
     price,
-    powerScale,
-    year
+    mode,
+    year = 2023
   } = req.body;
 
-  let baseLat = latitude;
-  let baseLon = longitude;
+  console.log("📥 Incoming Request:", req.body);
 
-  if (method === "city") {
-    const cityRow = cities.find(row => row.asciiname?.toLowerCase() === city?.toLowerCase());
-    if (!cityRow) {
-      return res.status(404).json({ error: "City not found in dataset" });
+  let centerLat = parseFloat(lat);
+  let centerLon = parseFloat(lon);
+
+  if (mode === "city") {
+    const found = cities.find(c => c.asciiname.toLowerCase() === city.toLowerCase());
+    if (!found) {
+      console.warn(`❌ City not found: ${city}`);
+      return res.status(404).json({ error: "City not found" });
     }
-    baseLat = parseFloat(cityRow.latitude);
-    baseLon = parseFloat(cityRow.longitude);
-    console.log(`📍 Using city \"${city}\" at [${baseLat}, ${baseLon}]`);
+
+    centerLat = parseFloat(found.latitude);
+    centerLon = parseFloat(found.longitude);
+    console.log(`📌 Using city: ${found.name}, lat: ${centerLat}, lon: ${centerLon}`);
   }
 
-  if (!baseLat || !baseLon || isNaN(baseLat) || isNaN(baseLon)) {
-    return res.status(400).json({ error: "Invalid coordinates" });
-  }
+  const results = {
+    unfeasible: [],
+    moderate: [],
+    good: [],
+    excellent: [],
+    max: -Infinity,
+    maxCoords: [],
+  };
 
-  const ranges = { unfeasible: [], moderate: [], good: [], excellent: [] };
-  let max = -1, maxLat = 0, maxLon = 0;
+  const latStart = centerLat - parseFloat(delta);
+  const lonStart = centerLon - parseFloat(delta);
+  const latEnd = centerLat + parseFloat(delta);
+  const lonEnd = centerLon + parseFloat(delta);
 
-  for (let i = baseLat - delta; i <= baseLat + delta; i += scale) {
-    for (let j = baseLon - delta; j <= baseLon + delta; j += scale) {
-      const url = `https://re.jrc.ec.europa.eu/api/MRcalc?lat=${i}&lon=${j}&horirrad=1&startyear=${year}&outputformat=basic`;
+  console.log("📊 Starting irradiance analysis...");
+
+  for (let i = latStart; i <= latEnd; i += parseFloat(scale)) {
+    for (let j = lonStart; j <= lonEnd; j += parseFloat(scale)) {
       try {
-        const response = await axios.get(url);
-        const matches = response.data.match(/\d+\.\d+/g);
-        const sum = matches.reduce((acc, val) => acc + parseFloat(val), 0);
-        const avg = sum / 12;
-        if (avg > max) {
-          max = avg;
-          maxLat = i;
-          maxLon = j;
+        const url = `https://re.jrc.ec.europa.eu/api/MRcalc?lat=${i}&lon=${j}&horirrad=1&startyear=${year}&outputformat=basic`;
+        const resp = await axios.get(url);
+        const match = resp.data.match(/\d+\.\d+/g);
+        if (!match || match.length !== 12) continue;
+
+        const avg = match.reduce((sum, val) => sum + parseFloat(val), 0) / 12;
+        const point = [i, j, avg];
+
+        if (avg < 100) results.unfeasible.push(point);
+        else if (avg < 150) results.moderate.push(point);
+        else if (avg < 200) results.good.push(point);
+        else results.excellent.push(point);
+
+        if (avg > results.max) {
+          results.max = avg;
+          results.maxCoords = [i, j];
         }
-        const point = { lat: i, lon: j, avg };
-        if (avg < 100) ranges.unfeasible.push(point);
-        else if (avg < 150) ranges.moderate.push(point);
-        else if (avg < 200) ranges.good.push(point);
-        else ranges.excellent.push(point);
-      } catch (e) {
-        console.error("❌ Failed to fetch irradiance for", i, j);
+      } catch (err) {
+        console.error(`⚠️ Failed irradiance for ${i},${j}: ${err.message}`);
       }
     }
   }
 
-  const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?lat=${maxLat}&lon=${maxLon}&format=json`;
-  let settlement = {};
+  const [bestLat, bestLon] = results.maxCoords;
+  if (!bestLat || !bestLon) {
+    return res.status(500).json({ error: "Irradiance data fetch failed." });
+  }
+
+  console.log(`🌞 Best irradiance at: [${bestLat}, ${bestLon}] = ${results.max.toFixed(2)} kWh/m²/mo`);
+
+  // Fetch settlement details near best location
   try {
-    const result = await axios.get(nominatimUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const data = result.data;
-    const name = data.address.city || data.address.town || data.address.village || data.address.hamlet || "Unknown";
-    const dist = haversineDistance(maxLat, maxLon, baseLat, baseLon);
+    const nominatimURL = `https://nominatim.openstreetmap.org/reverse?lat=${bestLat}&lon=${bestLon}&format=json`;
+    const resp = await axios.get(nominatimURL, {
+      headers: { "User-Agent": "Solar-Farm-Locator-App" }
+    });
+
+    const data = resp.data;
+    const name =
+      data.address.city ||
+      data.address.town ||
+      data.address.village ||
+      data.address.hamlet ||
+      "Unknown";
+
+    const dist = haversineDistance(bestLat, bestLon, data.lat, data.lon);
     const capex = powerScale * 4.25;
-    const transmissionCost = dist * 1.8;
-    settlement = {
+    const recovery = (capex * 1e7) / (powerScale * 4 * 1000 * 365 * (price - 3.74) * 0.3);
+
+    results.settlement = {
       name,
       lat: data.lat,
       lon: data.lon,
+      distance: dist,
       capex,
-      transmissionCost,
-      recoveryYears: capex * 1e7 / (powerScale * 4 * 1000 * 365 * (price - 3.74) * 0.3)
+      transmissionCost: dist * 1.8,
+      recoveryYears: recovery,
     };
-  } catch (e) {
-    console.error("❌ Settlement lookup failed");
+  } catch (err) {
+    console.warn("⚠️ Could not fetch nearby settlement:", err.message);
   }
 
-  res.json({
-    max: { value: max, lat: maxLat, lon: maxLon },
-    base: { lat: baseLat, lon: baseLon },
-    ranges,
-    settlement
-  });
+  console.log("✅ Completed analysis. Sending response.");
+  res.json(results);
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// --------------------------- Start Server -----------------------------
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  loadCityData();
+});

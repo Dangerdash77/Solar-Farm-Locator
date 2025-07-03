@@ -1,157 +1,182 @@
-import React, { useState } from "react";
-import axios from "axios";
-import { MapContainer, TileLayer, CircleMarker, Tooltip } from "react-leaflet";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartTooltip, ResponsiveContainer } from "recharts";
+import { useState, useEffect } from "react";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  useMap,
+} from "react-leaflet";
 import "leaflet/dist/leaflet.css";
+import "leaflet.heat";
+import "./App.css";
 
-const App = () => {
-  const [method, setMethod] = useState("city");
-  const [city, setCity] = useState("");
-  const [coords, setCoords] = useState({ lat: "", lon: "" });
-  const [delta, setDelta] = useState(0.3);
-  const [scale, setScale] = useState(0.05);
-  const [price, setPrice] = useState(7.5);
-  const [power, setPower] = useState(5);
-  const [year, setYear] = useState(2023);
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
+// 🔥 Custom HeatLayer using leaflet.heat
+function HeatLayer({ points }) {
+  const map = useMap();
 
-  const sendRequest = async () => {
-    setLoading(true);
-    const payload = {
-      method,
-      city,
-      latitude: parseFloat(coords.lat),
-      longitude: parseFloat(coords.lon),
-      delta: parseFloat(delta),
-      scale: parseFloat(scale),
-      price: parseFloat(price),
-      powerScale: parseFloat(power),
-      year: parseInt(year)
+  useEffect(() => {
+    if (!points.length) return;
+
+    const heat = window.L.heatLayer(points, {
+      radius: 35,
+      blur: 30,
+      maxZoom: 17,
+      gradient: {
+        0.0: "#0000ff",   // blue (coldest)
+        0.2: "#00ffff",   // cyan
+        0.4: "#00ff00",   // green
+        0.6: "#ffff00",   // yellow
+        0.8: "#ff9900",   // orange
+        1.0: "#ff0000"    // red (hottest)
+      },
+    }).addTo(map);
+
+    return () => {
+      map.removeLayer(heat);
     };
+  }, [points, map]);
+
+  return null;
+}
+
+function App() {
+  const [form, setForm] = useState({
+    city: "",
+    lat: "",
+    lon: "",
+    powerScale: 1,
+    delta: 0.2,
+    scale: 0.05,
+    price: 5,
+    mode: "city",
+  });
+
+  const [result, setResult] = useState(null);
+  const [showHeatmap, setShowHeatmap] = useState(true); // ✅ Toggle state
+
+  const handleSubmit = async e => {
+    e.preventDefault();
     try {
-      const res = await axios.post("http://localhost:8080/analyze", payload);
-      setResult(res.data);
+      const res = await fetch("http://localhost:8080/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      const data = await res.json();
+      console.log("🔍 API Result:", data);
+      setResult(data);
     } catch (err) {
-      alert("Error analyzing data");
+      console.error("❌ Error in API request:", err);
     }
-    setLoading(false);
   };
 
-  const categories = ["unfeasible", "moderate", "good", "excellent"];
-  const colors = {
-    unfeasible: "gray",
-    moderate: "orange",
-    good: "green",
-    excellent: "blue"
-  };
+  const heatPoints = [
+    ...(result?.unfeasible || []),
+    ...(result?.moderate || []),
+    ...(result?.good || []),
+    ...(result?.excellent || []),
+  ].map(([lat, lon, val]) => [lat, lon, val / 50]); // More intense
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto">
-      <h1 className="text-3xl font-bold text-center">☀️ Solar Farm Locator</h1>
+    <div className="app">
+      <h1>Solar Farm Feasibility Tool</h1>
 
-      <div className="grid md:grid-cols-2 gap-4 bg-white p-4 rounded-xl shadow">
-        <div className="space-y-3">
-          <label className="block font-semibold">Select Input Method:</label>
-          <select value={method} onChange={e => setMethod(e.target.value)} className="w-full p-2 border rounded">
-            <option value="city">City Name</option>
-            <option value="coords">Coordinates</option>
-          </select>
-
-          {method === "city" ? (
+      <form onSubmit={handleSubmit}>
+        <select
+          value={form.mode}
+          onChange={e => setForm({ ...form, mode: e.target.value })}
+        >
+          <option value="city">Search by City</option>
+          <option value="coords">Use Coordinates</option>
+        </select>
+        {form.mode === "city" ? (
+          <input
+            placeholder="City"
+            value={form.city}
+            onChange={e => setForm({ ...form, city: e.target.value })}
+          />
+        ) : (
+          <>
             <input
-              type="text"
-              placeholder="Enter city name"
-              className="w-full p-2 border rounded"
-              value={city}
-              onChange={e => setCity(e.target.value)}
+              placeholder="Latitude"
+              value={form.lat}
+              onChange={e => setForm({ ...form, lat: e.target.value })}
             />
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                type="number"
-                placeholder="Latitude"
-                value={coords.lat}
-                onChange={e => setCoords({ ...coords, lat: e.target.value })}
-                className="p-2 border rounded"
-              />
-              <input
-                type="number"
-                placeholder="Longitude"
-                value={coords.lon}
-                onChange={e => setCoords({ ...coords, lon: e.target.value })}
-                className="p-2 border rounded"
-              />
-            </div>
-          )}
-
-          <input type="number" value={delta} onChange={e => setDelta(e.target.value)} className="w-full p-2 border rounded" placeholder="Delta" />
-          <input type="number" value={scale} onChange={e => setScale(e.target.value)} className="w-full p-2 border rounded" placeholder="Scale" />
-          <input type="number" value={price} onChange={e => setPrice(e.target.value)} className="w-full p-2 border rounded" placeholder="Price per kWh" />
-          <input type="number" value={power} onChange={e => setPower(e.target.value)} className="w-full p-2 border rounded" placeholder="Power Scale (MW)" />
-          <input type="number" value={year} onChange={e => setYear(e.target.value)} className="w-full p-2 border rounded" placeholder="Year" />
-
-          <button
-            className="w-full p-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700"
-            onClick={sendRequest}
-            disabled={loading}
-          >
-            {loading ? "Analyzing..." : "Analyze"}
-          </button>
-        </div>
-
-        {result && (
-          <div className="space-y-3 text-sm">
-            <h2 className="text-xl font-semibold">Results Summary</h2>
-            <p><strong>Best Location:</strong> {result.max.lat.toFixed(3)}, {result.max.lon.toFixed(3)} — {result.max.value.toFixed(2)} kWh/m²/mo</p>
-            <p><strong>Settlement:</strong> {result.settlement.name}</p>
-            <p><strong>Transmission Distance:</strong> {result.settlement.transmissionCost.toFixed(2)} crore</p>
-            <p><strong>Recovery Time:</strong> {result.settlement.recoveryYears.toFixed(2)} years</p>
-          </div>
+            <input
+              placeholder="Longitude"
+              value={form.lon}
+              onChange={e => setForm({ ...form, lon: e.target.value })}
+            />
+          </>
         )}
-      </div>
+        <input
+          type="number"
+          step="0.1"
+          placeholder="Power (MW)"
+          value={form.powerScale}
+          onChange={e => setForm({ ...form, powerScale: e.target.value })}
+        />
+        <input
+          type="number"
+          step="0.05"
+          placeholder="Delta"
+          value={form.delta}
+          onChange={e => setForm({ ...form, delta: e.target.value })}
+        />
+        <input
+          type="number"
+          step="0.01"
+          placeholder="Grid scale"
+          value={form.scale}
+          onChange={e => setForm({ ...form, scale: e.target.value })}
+        />
+        <input
+          type="number"
+          step="0.1"
+          placeholder="Electricity Price ₹"
+          value={form.price}
+          onChange={e => setForm({ ...form, price: e.target.value })}
+        />
+        <button>Analyze</button>
+      </form>
+
+      {/* ✅ Toggle Button */}
+      {result && (
+        <button onClick={() => setShowHeatmap(!showHeatmap)} style={{ marginTop: "10px" }}>
+          {showHeatmap ? "Hide Heatmap" : "Show Heatmap"}
+        </button>
+      )}
 
       {result && (
         <>
-          <div className="h-[500px] w-full">
-            <MapContainer center={[result.base.lat, result.base.lon]} zoom={8} className="h-full w-full rounded-xl overflow-hidden">
-              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-              {categories.map(cat => result.ranges[cat].map((point, idx) => (
-                <CircleMarker
-                  key={`${cat}-${idx}`}
-                  center={[point.lat, point.lon]}
-                  radius={5}
-                  color={colors[cat]}
-                  fillOpacity={0.6}
-                >
-                  <Tooltip>{`${cat} – ${point.avg.toFixed(1)} kWh/m²/mo`}</Tooltip>
-                </CircleMarker>
-              )))}
-              <CircleMarker center={[result.max.lat, result.max.lon]} radius={8} color="red">
-                <Tooltip>Best Location</Tooltip>
-              </CircleMarker>
-            </MapContainer>
-          </div>
+          <MapContainer
+            center={result.maxCoords}
+            zoom={10}
+            style={{ height: "500px", marginTop: "20px" }}
+          >
+            <TileLayer
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              attribution="&copy; OpenStreetMap contributors"
+            />
+            {/* 🔥 Conditionally render heat layer */}
+            {showHeatmap && <HeatLayer points={heatPoints} />}
+            <Marker position={result.maxCoords}>
+              <Popup>
+                <strong>Max Irradiance:</strong> {result.max.toFixed(2)} kWh/m²/mo <br />
+                <strong>Lat:</strong> {result.maxCoords[0].toFixed(4)} <br />
+                <strong>Lon:</strong> {result.maxCoords[1].toFixed(4)}
+              </Popup>
+            </Marker>
+          </MapContainer>
 
-          <div className="h-64 bg-white mt-6 p-4 rounded-xl shadow">
-            <h3 className="font-bold mb-2">CapEx Recovery Projection</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={[...Array(11)].map((_, i) => ({
-                year: i,
-                recovered: Math.min(i / result.settlement.recoveryYears, 1) * 100
-              }))}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="year" label={{ value: "Years", position: "insideBottomRight", offset: -5 }} />
-                <YAxis unit="%" domain={[0, 100]} />
-                <RechartTooltip />
-                <Line type="monotone" dataKey="recovered" stroke="#8884d8" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          <h3>Settlement: {result.settlement?.name}</h3>
+          <p>CAPEX: ₹{result.settlement?.capex?.toFixed(2)} Cr</p>
+          <p>Transmission Cost: ₹{result.settlement?.transmissionCost?.toFixed(2)} Cr</p>
+          <p>Recovery Time: {result.settlement?.recoveryYears?.toFixed(1)} years</p>
         </>
       )}
     </div>
   );
-};
+}
 
 export default App;
