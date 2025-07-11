@@ -5,6 +5,8 @@ const cors = require("cors");
 const axios = require("axios");
 const csv = require("csv-parser");
 
+require("dotenv").config();
+
 const app = express();
 const PORT = 8080;
 
@@ -13,7 +15,7 @@ app.use(cors());
 
 let cities = [];
 
-// ----------------------- Haversine Distance --------------------------
+// -------------------- Haversine Distance --------------------
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
   const toRad = deg => (deg * Math.PI) / 180;
   const R = 6371;
@@ -26,7 +28,7 @@ const haversineDistance = (lat1, lon1, lat2, lon2) => {
   return R * c;
 };
 
-// ----------------------- Load CSV on Startup -------------------------
+// -------------------- Load CSV on Startup --------------------
 function loadCityData() {
   const results = [];
   const filePath = path.join(__dirname, "cities15000.csv");
@@ -40,7 +42,7 @@ function loadCityData() {
     });
 }
 
-// -------------------------- POST /api/analyze ------------------------
+// -------------------- POST /api/analyze --------------------
 app.post("/api/analyze", async (req, res) => {
   const {
     city,
@@ -51,7 +53,7 @@ app.post("/api/analyze", async (req, res) => {
     scale,
     price,
     mode,
-    year = 2023
+    year = 2023,
   } = req.body;
 
   console.log("📥 Incoming Request:", req.body);
@@ -78,6 +80,7 @@ app.post("/api/analyze", async (req, res) => {
     excellent: [],
     max: -Infinity,
     maxCoords: [],
+    monthly: [],
   };
 
   const latStart = centerLat - parseFloat(delta);
@@ -90,12 +93,15 @@ app.post("/api/analyze", async (req, res) => {
   for (let i = latStart; i <= latEnd; i += parseFloat(scale)) {
     for (let j = lonStart; j <= lonEnd; j += parseFloat(scale)) {
       try {
-        const url = `https://re.jrc.ec.europa.eu/api/MRcalc?lat=${i}&lon=${j}&horirrad=1&startyear=${year}&outputformat=basic`;
+        const baseURL = process.env.REACT_API_URL;
+        const url = `${baseURL}?lat=${i}&lon=${j}&horirrad=1&startyear=${year}&outputformat=basic`;
+
         const resp = await axios.get(url);
         const match = resp.data.match(/\d+\.\d+/g);
         if (!match || match.length !== 12) continue;
 
-        const avg = match.reduce((sum, val) => sum + parseFloat(val), 0) / 12;
+        const monthly = match.map(Number);
+        const avg = monthly.reduce((sum, val) => sum + val, 0) / 12;
         const point = [i, j, avg];
 
         if (avg < 100) results.unfeasible.push(point);
@@ -106,6 +112,7 @@ app.post("/api/analyze", async (req, res) => {
         if (avg > results.max) {
           results.max = avg;
           results.maxCoords = [i, j];
+          results.monthly = monthly;
         }
       } catch (err) {
         console.error(`⚠️ Failed irradiance for ${i},${j}: ${err.message}`);
@@ -120,11 +127,11 @@ app.post("/api/analyze", async (req, res) => {
 
   console.log(`🌞 Best irradiance at: [${bestLat}, ${bestLon}] = ${results.max.toFixed(2)} kWh/m²/mo`);
 
-  // Fetch settlement details near best location
+  // Fetch settlement details
   try {
     const nominatimURL = `https://nominatim.openstreetmap.org/reverse?lat=${bestLat}&lon=${bestLon}&format=json`;
     const resp = await axios.get(nominatimURL, {
-      headers: { "User-Agent": "Solar-Farm-Locator-App" }
+      headers: { "User-Agent": process.env.USER_AGENT || "Default-Agent" }
     });
 
     const data = resp.data;
@@ -135,7 +142,7 @@ app.post("/api/analyze", async (req, res) => {
       data.address.hamlet ||
       "Unknown";
 
-    const dist = haversineDistance(bestLat, bestLon, data.lat, data.lon);
+    const dist = haversineDistance(bestLat, bestLon, parseFloat(data.lat), parseFloat(data.lon));
     const capex = powerScale * 4.25;
     const recovery = (capex * 1e7) / (powerScale * 4 * 1000 * 365 * (price - 3.74) * 0.3);
 
@@ -156,7 +163,7 @@ app.post("/api/analyze", async (req, res) => {
   res.json(results);
 });
 
-// --------------------------- Start Server -----------------------------
+// -------------------- Start Server --------------------
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   loadCityData();
